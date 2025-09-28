@@ -1,0 +1,41 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5a8814e426dce81448824195f6de1b9a, type: 3}
+  m_Name: nair
+  m_EditorClassIdentifier: 
+  startupFrames: 4
+  endlagFrames: 6
+  landingLag: 1
+  animatorTrigger: nair
+  windows:
+  - startFrame: 1
+    activeFrames: 4
+    offset: {x: 0, y: 0}
+    size: {x: 2.2, y: 2.2}
+    damage: 20
+    baseKB: 5
+    growth: 0.1
+    kbDir: {x: 0.4, y: 0.4}
+    hitKind: 0
+    consumeAttackOnHit: 1
+    multiHitInterval: 0.1
+  - startFrame: 5
+    activeFrames: 26
+    offset: {x: 0, y: 0}
+    size: {x: 1.8, y: 1.8}
+    damage: 10
+    baseKB: 0
+    growth: 0
+    kbDir: {x: 0, y: 0}
+    hitKind: 0
+    consumeAttackOnHit: 1
+    multiHitInterval: 0.1
