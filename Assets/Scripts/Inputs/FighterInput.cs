@@ -31,6 +31,14 @@ public class FighterInput : MonoBehaviour
     public bool ShieldHeld { get; private set; }
     public bool SmashHeld { get; private set; }
 
+    [SerializeField] PlatformFighterController ctrl;
+
+       void Awake()
+    {
+        // Auto-wire if not set in Inspector
+        if (!ctrl) ctrl = GetComponent<PlatformFighterController>();
+    }
+
     // Reset one-frame flags each LateUpdate
     void LateUpdate()
     {
@@ -40,6 +48,14 @@ public class FighterInput : MonoBehaviour
         GrabPressed = false;
         SmashPressed = false;
         RunTogglePressed = false;
+        // If the controller is hard-locked, zero inputs and clear presses
+        if (ctrl && ctrl.HardLocked)
+        {
+            Move = Vector2.zero;
+            // Clear one-frame presses so nothing queues
+            JumpPressed = AttackPressed = SpecialPressed = GrabPressed = false;
+        }
+
     }
 
     public void OnMove(InputAction.CallbackContext ctx)

@@ -19,12 +19,8 @@ public class AttackController : MonoBehaviour
     public bool bubbleRadiusFromMaxAxis = true;
 
     [Header("Runtime Visuals (Game View)")]
-    [Tooltip("Show hit bubbles/boxes in-game. Uses HitVisDrawer if present, otherwise line Debug.DrawLine.")]
     public bool showHitVis = true;
-
-    [Tooltip("Toggle runtime hit visuals.")]
     public KeyCode toggleHitVisKey = KeyCode.H;
-
     [Range(8, 64)] public int circleSegments = 20;
     public Color hitVisColor = new Color(1f, 0f, 0f, 0.35f);
 
@@ -33,7 +29,7 @@ public class AttackController : MonoBehaviour
     public bool aerialEndsOnLanding = true;
 
     [Header("FX (optional)")]
-    public CharacterTint tint; // optional; safe if not assigned
+    public CharacterTint tint; // optional
 
     [Header("Scene Gizmos (Editor)")]
     public bool showGizmosInScene = true;
@@ -77,7 +73,8 @@ public class AttackController : MonoBehaviour
             if (HitVisDrawer.Instance) HitVisDrawer.Instance.visible = showHitVis;
         }
 
-        if (busy) return;
+        // Block attacks during landing lag or hard lock
+        if (busy || (ctrl != null && (ctrl.InLandingLag || ctrl.HardLocked))) return;
 
         if (moves == null)
         {
@@ -119,7 +116,7 @@ public class AttackController : MonoBehaviour
             if (Mathf.Abs(x) > input.dirThreshold)
             {
                 bool forward = (x > 0f && ctrl.FacingRight) || (x < 0f && !ctrl.FacingRight);
-                return forward ? moves.nair : moves.bair; // swap to fair if you add it
+                return forward ? moves.nair : moves.bair;
             }
             return moves.nair;
         }
@@ -164,51 +161,68 @@ public class AttackController : MonoBehaviour
         return moves.special;
     }
 
+    void DrawCircle(Vector2 center, float radius, Color color, int segments = 16)
+    {
+        float angleStep = 2f * Mathf.PI / segments;
+        Vector3 prev = center + new Vector2(Mathf.Cos(0), Mathf.Sin(0)) * radius;
+
+        for (int i = 1; i <= segments; i++)
+        {
+            float angle = i * angleStep;
+            Vector3 next = center + new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * radius;
+            Debug.DrawLine(prev, next, color, Time.fixedDeltaTime);
+            prev = next;
+        }
+    }
+
     IEnumerator DoAttack(AttackClip clip)
     {
-        if (!clip) yield break;
+        if (clip == null) yield break;
 
-        _lastPlayedClip = clip; // remember for Scene gizmos
         busy = true;
+        _lastPlayedClip = clip;
 
         if (!string.IsNullOrEmpty(clip.animatorTrigger) && anim)
             anim.SetTrigger(clip.animatorTrigger);
 
-        // Startup (frame-accurate if Fixed Timestep = 1/60)
+        bool startedInAir = !ctrl.Grounded;
+        bool landed = false;
+
+        // --- STARTUP ---
         for (int i = 0; i < clip.startupFrames; i++)
+        {
+            if (startedInAir && ctrl.Grounded && aerialEndsOnLanding)
+            {
+                landed = true;
+                break;
+            }
             yield return new WaitForFixedUpdate();
+        }
 
-        bool startedInAir      = !ctrl.Grounded;
-        bool landedDuringAlive = false;
+        if (landed)
+        {
+            HandleLandingLag(clip);
+            busy = false;
+            yield break;
+        }
 
-        // Determine longest active window
+        // --- ACTIVE ---
         int maxActive = 0;
-        for (int i = 0; i < clip.windows.Count; i++)
-            maxActive = Mathf.Max(maxActive, clip.windows[i].startFrame + clip.windows[i].activeFrames - 1);
+        foreach (var w in clip.windows)
+            maxActive = Mathf.Max(maxActive, w.startFrame + w.activeFrames - 1);
 
-        // Per-attack state
-        bool attackConsumedByHit = false; // set by Single windows that consume the attack
-        var hitOnceThisAttack = new HashSet<PlatformFighterActor>(); // Single windows
-        var lastHitTime = new Dictionary<(PlatformFighterActor target, int wi), float>(64); // Multi cadence
+        var hitThisAttack = new HashSet<PlatformFighterActor>();
 
-        // ACTIVE frames
         for (int f = 1; f <= maxActive; f++)
         {
             if (startedInAir && ctrl.Grounded && aerialEndsOnLanding)
             {
-                landedDuringAlive = true;
+                landed = true;
                 break;
             }
 
-            if (attackConsumedByHit)
+            foreach (var w in clip.windows)
             {
-                yield return new WaitForFixedUpdate();
-                continue;
-            }
-
-            for (int wi = 0; wi < clip.windows.Count; wi++)
-            {
-                var w = clip.windows[wi];
                 if (f < w.startFrame || f >= w.startFrame + w.activeFrames) continue;
 
                 Vector2 center = (Vector2)(rb ? rb.position : (Vector2)transform.position)
@@ -224,32 +238,16 @@ public class AttackController : MonoBehaviour
                     foreach (var h in hits)
                     {
                         var t = h.GetComponentInParent<PlatformFighterActor>();
-                        if (!t || t == actor) continue;
+                        if (t == null || t == actor) continue;
+                        if (hitThisAttack.Contains(t)) continue;
 
-                        if (w.hitKind == HitKind.Single)
-                        {
-                            if (hitOnceThisAttack.Contains(t)) continue;
-                            ApplyWindowHit(t, w);
-                            hitOnceThisAttack.Add(t);
-                            if (w.consumeAttackOnHit) attackConsumedByHit = true;
-                        }
-                        else // Multi
-                        {
-                            float interval = Mathf.Max(0.01f, w.multiHitInterval <= 0f ? 0.1f : w.multiHitInterval);
-                            var key = (t, wi);
-                            if (!lastHitTime.TryGetValue(key, out float last) || (Time.time - last) >= interval)
-                            {
-                                ApplyWindowHit(t, w);
-                                lastHitTime[key] = Time.time;
-                            }
-                        }
+                        t.AddDamage(w.damage);
+                        Vector2 kb = new Vector2(w.kbDir.x * facing, w.kbDir.y);
+                        t.ApplyKnockback(kb, w.baseKB, w.growth);
+                        hitThisAttack.Add(t);
                     }
 
-                    if (showHitVis)
-                    {
-                        if (HitVisDrawer.Instance) HitVisDrawer.Instance.DrawCircleSolid(center, r, hitVisColor, circleSegments);
-                        else DrawCircleOutline(center, r, Color.red, circleSegments);
-                    }
+                    if (showHitVis) DrawCircle(center, r, Color.red, circleSegments);
                 }
                 else
                 {
@@ -257,31 +255,26 @@ public class AttackController : MonoBehaviour
                     foreach (var h in hits)
                     {
                         var t = h.GetComponentInParent<PlatformFighterActor>();
-                        if (!t || t == actor) continue;
+                        if (t == null || t == actor) continue;
+                        if (hitThisAttack.Contains(t)) continue;
 
-                        if (w.hitKind == HitKind.Single)
-                        {
-                            if (hitOnceThisAttack.Contains(t)) continue;
-                            ApplyWindowHit(t, w);
-                            hitOnceThisAttack.Add(t);
-                            if (w.consumeAttackOnHit) attackConsumedByHit = true;
-                        }
-                        else
-                        {
-                            float interval = Mathf.Max(0.01f, w.multiHitInterval <= 0f ? 0.1f : w.multiHitInterval);
-                            var key = (t, wi);
-                            if (!lastHitTime.TryGetValue(key, out float last) || (Time.time - last) >= interval)
-                            {
-                                ApplyWindowHit(t, w);
-                                lastHitTime[key] = Time.time;
-                            }
-                        }
+                        t.AddDamage(w.damage);
+                        Vector2 kb = new Vector2(w.kbDir.x * facing, w.kbDir.y);
+                        t.ApplyKnockback(kb, w.baseKB, w.growth);
+                        hitThisAttack.Add(t);
                     }
 
                     if (showHitVis)
                     {
-                        if (HitVisDrawer.Instance) HitVisDrawer.Instance.DrawBoxSolid(center, w.size, hitVisColor);
-                        else DrawBoxOutline(center, w.size, Color.red);
+                        Vector2 half = w.size * 0.5f;
+                        Vector3 a = new(center.x - half.x, center.y - half.y);
+                        Vector3 b = new(center.x - half.x, center.y + half.y);
+                        Vector3 c = new(center.x + half.x, center.y + half.y);
+                        Vector3 d = new(center.x + half.x, center.y - half.y);
+                        Debug.DrawLine(a, b, Color.red, Time.fixedDeltaTime);
+                        Debug.DrawLine(b, c, Color.red, Time.fixedDeltaTime);
+                        Debug.DrawLine(c, d, Color.red, Time.fixedDeltaTime);
+                        Debug.DrawLine(d, a, Color.red, Time.fixedDeltaTime);
                     }
                 }
             }
@@ -289,118 +282,52 @@ public class AttackController : MonoBehaviour
             yield return new WaitForFixedUpdate();
         }
 
-        // Endlag or landing lag
-        if (landedDuringAlive && clip.landingLag > 0)
+        if (landed)
         {
-            if (tint) tint.SetLandingLagTint(true);
-            for (int i = 0; i < clip.landingLag; i++)
-                yield return new WaitForFixedUpdate();
-            if (tint) tint.SetLandingLagTint(false);
+            HandleLandingLag(clip);
+            busy = false;
+            yield break;
         }
-        else
+
+        // --- ENDLAG (air only) ---
+        for (int i = 0; i < clip.endlagFrames; i++)
         {
-            for (int i = 0; i < clip.endlagFrames; i++)
-                yield return new WaitForFixedUpdate();
+            if (startedInAir && ctrl.Grounded && aerialEndsOnLanding)
+            {
+                HandleLandingLag(clip);
+                busy = false;
+                yield break;
+            }
+            yield return new WaitForFixedUpdate();
         }
 
         busy = false;
     }
 
-    // -------- Helpers --------
-
-    void ApplyWindowHit(PlatformFighterActor target, HitboxWindow w)
+    void HandleLandingLag(AttackClip clip)
     {
-        target.AddDamage(w.damage);
+        int lag = Mathf.Max(0, clip.landingLag);
+        if (lag <= 0) return;
 
-        // Determine Sakurai/Angle/Legacy mode
-        float finalDegrees;
-        bool relative = true;
-
-        if (w.useSakuraiAngle)
+        if (anim)
         {
-            // Use TARGET grounded state if we can find it; fall back to 'grounded' if unknown.
-            bool targetGrounded = true;
-            var tgtCtrl = target.GetComponentInParent<PlatformFighterController>();
-            if (tgtCtrl != null) targetGrounded = tgtCtrl.Grounded;
-
-            finalDegrees = targetGrounded ? w.sakuraiGroundAngleDeg : w.sakuraiAirAngleDeg;
-            relative = true; // Sakurai is conceptually forward-relative in Smash
-        }
-        else if (w.useKbAngle)
-        {
-            finalDegrees = w.kbAngleDeg;
-            relative = w.angleIsRelativeToFacing;
-        }
-        else
-        {
-            // Legacy XY fallback
-            int face = (ctrl != null && ctrl.FacingRight) ? 1 : -1;
-            Vector2 legacy = new Vector2(w.kbDir.x * face, w.kbDir.y);
-            if (legacy.sqrMagnitude <= 0f) legacy = new Vector2(1 * face, 0);
-            legacy.Normalize();
-            target.ApplyKnockback(legacy, w.baseKB, w.growth);
-            return;
+            anim.ResetTrigger(clip.animatorTrigger);
+            anim.SetTrigger("Land");
         }
 
-        // Convert degrees -> unit vector (apply facing if relative)
-        int facingSign = (ctrl != null && ctrl.FacingRight) ? 1 : -1;
-        Vector2 dir = GetKBDirFromAngle(finalDegrees, relative ? facingSign : 1);
+        ctrl.BeginLandingLag(lag);
+        if (tint) tint.SetLandingLagTint(true);
 
-        // Optional: Ground clamp (avoid downward/outward angles that glue to floor)
-        var tgtCtrl2 = target.GetComponentInParent<PlatformFighterController>();
-        bool tgtGrounded2 = tgtCtrl2 ? tgtCtrl2.Grounded : true;
-        if (tgtGrounded2 && w.minUpDegreesOnGround > 0f)
-        {
-            // Compute the current angle after facing flip, then clamp to a minimum upward
-            float worldDeg = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
-            // Convert to a 'forward-relative' frame to apply a simple clamp
-            float relDeg = relative ? (worldDeg * Mathf.Sign(facingSign)) : worldDeg;
-
-            if (relDeg < w.minUpDegreesOnGround)
-            {
-                relDeg = w.minUpDegreesOnGround;
-                dir = GetKBDirFromAngle(relDeg, relative ? facingSign : 1);
-            }
-        }
-
-        target.ApplyKnockback(dir, w.baseKB, w.growth);
+        StartCoroutine(LandingLagRoutine(lag));
     }
 
-    static Vector2 GetKBDirFromAngle(float degrees, int facingSign)
+    IEnumerator LandingLagRoutine(int frames)
     {
-        float rad = degrees * Mathf.Deg2Rad;
-        Vector2 d = new Vector2(Mathf.Cos(rad), Mathf.Sin(rad));
-        d.x *= facingSign;
-        if (d.sqrMagnitude > 0f) d.Normalize();
-        else d = new Vector2(1 * facingSign, 0);
-        return d;
-    }
+        for (int i = 0; i < frames; i++)
+            yield return new WaitForFixedUpdate();
 
-    void DrawCircleOutline(Vector2 c, float r, Color col, int seg)
-    {
-        if (seg < 3) seg = 3;
-        float step = Mathf.PI * 2f / seg;
-        Vector3 prev = c + new Vector2(Mathf.Cos(0f), Mathf.Sin(0f)) * r;
-        for (int i = 1; i <= seg; i++)
-        {
-            float a = step * i;
-            Vector3 next = c + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * r;
-            Debug.DrawLine(prev, next, col, Time.fixedDeltaTime);
-            prev = next;
-        }
-    }
-
-    void DrawBoxOutline(Vector2 c, Vector2 s, Color col)
-    {
-        Vector2 h = s * 0.5f;
-        Vector3 a = new Vector3(c.x - h.x, c.y - h.y);
-        Vector3 b = new Vector3(c.x - h.x, c.y + h.y);
-        Vector3 d = new Vector3(c.x + h.x, c.y - h.y);
-        Vector3 e = new Vector3(c.x + h.x, c.y + h.y);
-        Debug.DrawLine(a, b, col, Time.fixedDeltaTime);
-        Debug.DrawLine(b, e, col, Time.fixedDeltaTime);
-        Debug.DrawLine(e, d, col, Time.fixedDeltaTime);
-        Debug.DrawLine(d, a, col, Time.fixedDeltaTime);
+        if (anim) anim.SetTrigger("LandingDone");
+        if (tint) tint.SetLandingLagTint(false);
     }
 
     // -------- Scene Gizmos --------
